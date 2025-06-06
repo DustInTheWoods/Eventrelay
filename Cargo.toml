@@ -1,0 +1,26 @@
+[package]
+name = "Eventrelay"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "chat_client"
+path = "examples/client_example.rs"
+
+[[bin]]
+name = "config_example"
+path = "examples/config_example.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+log = "0.4.27"
+env_logger = "0.10.0"
+bytes = "1.10.1"
+thiserror = "2.0.12"
+serde_json = "1.0.107"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8.8"
+
+async-trait = "0.1"
+uuid = { version = "1.4", features = ["v4"] }
+rand = "0.9.1"

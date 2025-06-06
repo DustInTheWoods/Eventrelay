@@ -1,0 +1,21 @@
+# ================================
+# 📡 EventRelay Server Configuration
+# ================================
+
+# 🎯 Eindeutige Kennung dieses Servers
+id = "server1"
+
+# 🔌 Adresse für eingehende Verbindungen
+addr = "127.0.0.1:8080"
+
+# 🌐 Bekannte Peer-Server
+peers = [
+    "127.0.0.1:8081",
+    "127.0.0.1:8082"
+]
+
+# 📣 Öffentliche Topics zur Verteilung
+public_channels = [
+    "chat/global",
+    "perf/test"
+]
