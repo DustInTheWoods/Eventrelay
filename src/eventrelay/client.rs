@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use log::{debug, info};
+use log::{debug, info, warn};
 use crate::eventrelay::types::ClientId;
 use crate::tlv::message::TLVMessage;
 
@@ -38,11 +38,10 @@ impl ClientRegistry {
         let mut sent_count = 0;
         for id in client_ids {
             if let Some(sender) = clients.get(id) {
-                debug!("Sending message to client: {:?}", id);
                 sender.send(msg);
                 sent_count += 1;
             } else {
-                debug!("Client not found: {:?}", id);
+                warn!("Client not found: {:?}", id);
             }
         }
         debug!("Message sent to {}/{} clients", sent_count, client_ids.len());
@@ -55,14 +54,11 @@ impl ClientRegistry {
         for id in client_ids {
             if exclude_id.map_or(true, |exclude| *id != exclude) {
                 if let Some(sender) = clients.get(id) {
-                    debug!("Sending message to client: {:?}", id);
                     sender.send(msg);
                     sent_count += 1;
                 } else {
-                    debug!("Client not found: {:?}", id);
+                    warn!("Client not found: {:?}", id);
                 }
-            } else {
-                debug!("Skipping excluded client: {:?}", id);
             }
         }
         debug!("Message sent to {}/{} clients (excluding excluded client)", sent_count, client_ids.len());
@@ -77,8 +73,7 @@ impl ClientRegistry {
             let client_ids: Vec<ClientId> = clients.keys().cloned().collect();
             debug!("Client IDs receiving broadcast: {:?}", client_ids);
 
-            for (id, sender) in clients.iter() {
-                debug!("Sending message to client: {:?}", id);
+            for sender in clients.values() {
                 sender.send(msg);
             }
         }
@@ -102,11 +97,8 @@ impl ClientRegistry {
 
             for (id, sender) in clients.iter() {
                 if exclude_id.map_or(true, |exclude| *id != exclude) {
-                    debug!("Sending message to client: {:?}", id);
                     sender.send(msg);
                     sent_count += 1;
-                } else {
-                    debug!("Skipping excluded client: {:?}", id);
                 }
             }
         }

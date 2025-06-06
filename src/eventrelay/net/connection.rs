@@ -1,8 +1,7 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
-use log::{info, warn, error, debug};
-use rand::{Rng, RngCore};
+use log::{info, warn, error, debug, trace};
+use rand::RngCore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::io::split;
@@ -15,6 +14,58 @@ use crate::eventrelay::client::ClientSender;
 use crate::eventrelay::types::ClientId;
 
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
+fn process_initial_message(
+    msg: TLVMessage,
+    writer: &Arc<tokio::sync::Mutex<WriteHalf<TcpStream>>>,
+    handler: &Arc<EventHandler>,
+    client_id: ClientId,
+) -> Option<String> {
+    match msg.event_type {
+        EventType::SyncInit => {
+            if let Some(raw) = msg.get_field(FieldType::Key) {
+                if let Ok(id_str) = std::str::from_utf8(raw) {
+                    let id = id_str.to_string();
+
+                    let peer_sender = Arc::new(WriterPeerSender { writer: writer.clone() });
+                    handler.peers.register(id.clone(), peer_sender);
+
+                    let mut ack = TLVMessage::new(EventType::SyncAck);
+                    ack.insert_field(FieldType::Key, Bytes::copy_from_slice(id.as_bytes()));
+                    handler.peers.get(&id).map(|s| s.send(&ack));
+                    info!("✅ SyncAck sent to {}", id);
+
+                    return Some(id);
+                }
+            }
+        }
+        EventType::SyncAck => {
+            if let Some(raw) = msg.get_field(FieldType::Key) {
+                if let Ok(id_str) = std::str::from_utf8(raw) {
+                    let id = id_str.to_string();
+
+                    if !handler.peers.contains(&id) {
+                        let sender = Arc::new(WriterPeerSender { writer: writer.clone() });
+                        handler.peers.register(id.clone(), sender);
+                    }
+
+                    info!("🔄 SyncAck received from {}", id);
+                    return Some(id);
+                }
+            }
+        }
+        EventType::Subscribe => {
+            if let Some(topic) = msg.get_field(FieldType::Key) {
+                handler.handle_subscribe(topic, client_id);
+            }
+        }
+        _ => {
+            handler.handle_event(&msg, None, Some(client_id));
+        }
+    }
+
+    None
+}
 
 /// PeerSender
 pub struct WriterPeerSender {
@@ -33,7 +84,7 @@ impl PeerSender for WriterPeerSender {
                         error!("Peer send error: {}", e);
                     } else {
                         let _ = w.flush().await;
-                        debug!("Peer message sent: {} bytes", data.len());
+                        trace!("Peer message sent: {} bytes", data.len());
                     }
                 }
                 Err(_) => error!("Peer writer busy"),
@@ -59,7 +110,7 @@ impl ClientSender for WriterClientSender {
                         error!("Client send error: {}", e);
                     } else {
                         let _ = w.flush().await;
-                        debug!("Client message sent: {} bytes", data.len());
+                        trace!("Client message sent: {} bytes", data.len());
                     }
                 }
                 Err(_) => error!("Client writer busy"),
@@ -88,47 +139,7 @@ pub async fn handle_connection(stream: TcpStream, handler: Arc<EventHandler>) ->
 
     // Erste Nachricht lesen
     if let Some(msg) = read_message(&mut reader).await {
-        match msg.event_type {
-            EventType::SyncInit => {
-                if let Some(raw) = msg.get_field(FieldType::Key) {
-                    if let Ok(id_str) = std::str::from_utf8(raw) {
-                        let id = id_str.to_string();
-                        peer_id = Some(id.clone());
-
-                        let peer_sender = Arc::new(WriterPeerSender { writer: writer.clone() });
-                        handler.peers.register(id.clone(), peer_sender);
-
-                        let mut ack = TLVMessage::new(EventType::SyncAck);
-                        ack.insert_field(FieldType::Key, Bytes::copy_from_slice(id.as_bytes()));
-                        handler.peers.get(&id).map(|s| s.send(&ack));
-                        info!("✅ SyncAck sent to {}", id);
-                    }
-                }
-            }
-            EventType::SyncAck => {
-                if let Some(raw) = msg.get_field(FieldType::Key) {
-                    if let Ok(id_str) = std::str::from_utf8(raw) {
-                        let id = id_str.to_string();
-                        peer_id = Some(id.clone());
-
-                        if !handler.peers.contains(&id) {
-                            let sender = Arc::new(WriterPeerSender { writer: writer.clone() });
-                            handler.peers.register(id.clone(), sender);
-                        }
-
-                        info!("🔄 SyncAck received from {}", id);
-                    }
-                }
-            }
-            EventType::Subscribe => {
-                if let Some(topic) = msg.get_field(FieldType::Key) {
-                    handler.handle_subscribe(topic, client_id);
-                }
-            }
-            _ => {
-                handler.handle_event(&msg, peer_id.as_deref(), Some(client_id));
-            }
-        }
+        peer_id = process_initial_message(msg, &writer, &handler, client_id);
     } else {
         handler.clients.unregister(client_id);
         return Ok(());
@@ -185,7 +196,7 @@ async fn read_message(reader: &mut (impl AsyncReadExt + Unpin)) -> Option<TLVMes
     full.extend_from_slice(&len_buf);
     full.extend_from_slice(&rest);
 
-    debug!("📥 Vollständiger Nachricht-Buffer: {:?}", full);
+    trace!("📥 Full message buffer: {:?}", full);
 
     TLVMessage::parse(Bytes::from(full)).ok()
 }

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use log::debug;
+use log::{debug, trace, warn};
 use crate::error::{ErrorCode, ReplicashError};
 use crate::tlv::types::{EventType, FieldType};
+
+const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
 #[derive(Debug, Clone)]
 pub struct TLVMessage {
@@ -30,15 +32,15 @@ impl TLVMessage {
             ));
         }
 
-        // Debug: Log the first few bytes of the message
-        debug!("📦 Parsing message: first bytes = {:?}", &raw[..std::cmp::min(10, raw.len())]);
+        // Trace: look at the first few bytes of the message
+        trace!("📦 Parsing message start: {:?}", &raw[..std::cmp::min(10, raw.len())]);
 
         // Store a copy of the original raw data for slicing
         let original_raw = raw.clone();
 
         // Skip the length field (4 bytes) before reading the event type
         let _length = raw.get_u32();
-        debug!("📏 Message length = {}", _length);
+        trace!("📏 Message length = {}", _length);
 
         let event_type = EventType::from_u8(raw.get_u8())?;
 
@@ -70,6 +72,8 @@ impl TLVMessage {
             offset += field_len;
         }
 
+        debug!("Parsed message {:?} with {} fields", event_type, fields.len());
+
         Ok(Self {
             event_type,
             raw,
@@ -77,25 +81,24 @@ impl TLVMessage {
         })
     }
 
+    /// Berechnet die Gesamtgröße der serialisierten Nachricht
+    fn total_size(&self) -> usize {
+        let mut size = 5; // 4 bytes length + 1 byte event type
+        for value in self.fields.values() {
+            size += 1 + 4 + value.len();
+        }
+        size
+    }
+
     /// Serialisiert die Nachricht als Bytes
     pub fn encode(&self) -> Bytes {
         // Calculate the total size needed for the message
-        let mut total_size = 5; // 4 bytes for length + 1 byte for event type
-
-        // Calculate size needed for all fields
-        debug!("📊 Encoding message with fields:");
-        for (field_type, value) in &self.fields {
-            let field_size = 1 + 4 + value.len(); // 1 byte for field type + 4 bytes for length + field data
-            debug!("  - Field {:?}: {} bytes", field_type, value.len());
-            total_size += field_size;
-        }
-        debug!("📏 Total calculated message size: {} bytes", total_size);
+        let total_size = self.total_size();
+        debug!("Encoding {:?} with {} fields ({} bytes)", self.event_type, self.fields.len(), total_size);
 
         // Check if the message size exceeds the maximum allowed size
-        const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
         if total_size > MAX_MESSAGE_SIZE {
-            debug!("⚠️ Message too large: {} bytes (Maximum: {} bytes)", total_size, MAX_MESSAGE_SIZE);
-            // Return an empty message to prevent sending a message that's too large
+            warn!("Message too large: {} bytes (Maximum: {} bytes)", total_size, MAX_MESSAGE_SIZE);
             return Bytes::new();
         }
 
@@ -103,19 +106,9 @@ impl TLVMessage {
         let mut msg = BytesMut::with_capacity(total_size);
 
         // Write the header
-        debug!("📝 Writing message length to header: {} bytes", total_size);
         msg.put_u32(total_size as u32);
         msg.put_u8(self.event_type as u8);
-
-        // Debug: Print the first few bytes of the header
-        if msg.len() >= 5 {
-            debug!("📊 Message header bytes: [0x{:02X} 0x{:02X} 0x{:02X} 0x{:02X} 0x{:02X}]",
-                msg[0], msg[1], msg[2], msg[3], msg[4]);
-            // Also print the length as a u32
-            let len_bytes = [msg[0], msg[1], msg[2], msg[3]];
-            let len = u32::from_be_bytes(len_bytes);
-            debug!("📏 Length from header: {} bytes", len);
-        }
+        trace!("Header written for {:?}", self.event_type);
 
         // Write all fields directly to the final buffer
         for (field_type, value) in &self.fields {
@@ -125,21 +118,7 @@ impl TLVMessage {
             msg.extend_from_slice(value);
         }
 
-        // Debug: Log the event type and the first few bytes of the encoded message
-        debug!("📤 Encoding message: event_type = {:?}, first bytes = {:?}", 
-               self.event_type, 
-               &msg[..std::cmp::min(10, msg.len())]);
-
-        // Debug: Log the entire message if it's not too large
-        if msg.len() <= 100 {
-            debug!("📦 Full encoded message: {:?}", &msg[..]);
-        } else {
-            debug!("📦 Encoded message too large to log fully: {} bytes", msg.len());
-            // Log the first 50 bytes
-            debug!("📦 First 50 bytes: {:?}", &msg[..50]);
-            // Log the last 50 bytes
-            debug!("📦 Last 50 bytes: {:?}", &msg[(msg.len() - 50)..]);
-        }
+        trace!("Encoded message {:?} size: {} bytes", self.event_type, msg.len());
 
         msg.freeze()
     }
