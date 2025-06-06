@@ -45,7 +45,6 @@ impl PeerSender for TcpPeerSender {
         // Use tokio::spawn to handle the async write operation
         let handle = tokio::spawn(async move {
             // Get a lock on the stream
-            debug!("TcpPeerSender acquiring lock on stream");
             let mut stream = match stream_clone.try_lock() {
                 Ok(stream) => stream,
                 Err(_) => {
@@ -53,8 +52,6 @@ impl PeerSender for TcpPeerSender {
                     return;
                 }
             };
-
-            debug!("TcpPeerSender sending message: {} bytes", data_clone.len());
 
             // Write the data and handle errors
             match stream.write_all(&data_clone).await {
