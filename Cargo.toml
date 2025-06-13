@@ -1,15 +1,12 @@
 [package]
 name = "Eventrelay"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [[bin]]
 name = "chat_client"
 path = "examples/client_example.rs"
 
-[[bin]]
-name = "config_example"
-path = "examples/config_example.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -20,7 +17,8 @@ thiserror = "2.0.12"
 serde_json = "1.0.107"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8.8"
-
-async-trait = "0.1"
-uuid = { version = "1.4", features = ["v4"] }
 rand = "0.9.1"
+smallvec = "1.15.0"
+uuid = { version = "1.17.0", features = ["v4"] }
+dashmap = "7.0.0-rc2"
+tokio-util = "0.7.15"

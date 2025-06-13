@@ -13,6 +13,7 @@ pub enum EventType {
     // Events
     Event = 0x10,
     Subscribe = 0x11,
+    Unsubscribe = 0x12,
 
     // Sync
     SyncPush = 0x20,
@@ -31,7 +32,7 @@ impl EventType {
     /// Convert a u8 to an EventType
     pub fn from_u8(value: u8) -> Result<Self, ReplicashError> {
         // Debug: Log the raw value being converted
-        debug!("🔄 Converting u8 to EventType: value = 0x{:02X}", value);
+        debug!("Converting u8 to EventType: value = 0x{:02X}", value);
 
         match value {
             0x01 => {
@@ -51,6 +52,9 @@ impl EventType {
             },
             0x11 => {
                 Ok(Self::Subscribe)
+            },
+            0x12 => {
+                Ok(Self::Unsubscribe)
             },
             0x20 => {
                 Ok(Self::SyncPush)
@@ -98,8 +102,9 @@ pub enum FieldType {
     Group = 0x05,
     Timestamp = 0x06,
     Version = 0x07,
-    ErrorCode = 0x08,
-    ErrorText = 0x09,
+    ID = 0x08,
+    ErrorCode = 0xF0,
+    ErrorText = 0xF1,
 }
 
 impl FieldType {
@@ -113,8 +118,9 @@ impl FieldType {
             0x05 => Ok(Self::Group),
             0x06 => Ok(Self::Timestamp),
             0x07 => Ok(Self::Version),
-            0x08 => Ok(Self::ErrorCode),
-            0x09 => Ok(Self::ErrorText),
+            0x08 => Ok(Self::ID),
+            0xF0 => Ok(Self::ErrorCode),
+            0xF1 => Ok(Self::ErrorText),
             _ => Err(ReplicashError::new(
                 ErrorCode::MalformedTlv,
                 format!("Unknown field type: 0x{:02X}", value),

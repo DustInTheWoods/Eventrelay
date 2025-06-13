@@ -1,191 +1,223 @@
+use std::io::ErrorKind;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use bytes::Bytes;
-use log::{info, warn, error, debug};
-use rand::{Rng, RngCore};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
+use crate::error::{ErrorCode, ReplicashError};
+use bytes::{Bytes, BytesMut};
+use log::{debug, error, info, warn};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::io::split;
-
-use crate::tlv::message::TLVMessage;
-use crate::tlv::types::{EventType, FieldType};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use uuid::Uuid;
+use crate::eventrelay::net::events::{handle_event, handle_subscribe, handle_sync_ack, handle_sync_init, handle_unsubscribe};
 use crate::eventrelay::handler::EventHandler;
-use crate::eventrelay::broadcaster::PeerSender;
-use crate::eventrelay::client::ClientSender;
-use crate::eventrelay::types::ClientId;
+use crate::tlv::message::TLVMessage;
+use crate::tlv::types::EventType;
+use tokio_util::sync::CancellationToken;
 
-const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// PeerSender
-pub struct WriterPeerSender {
-    writer: Arc<tokio::sync::Mutex<WriteHalf<TcpStream>>>,
+pub struct Client {
+    id: Bytes,
+    write_tx: UnboundedSender<TLVMessage>,
+    cancel_token: CancellationToken,
+    is_peer: AtomicBool,
+    handler: Arc<EventHandler>,
 }
 
-impl PeerSender for WriterPeerSender {
-    fn send(&self, msg: &TLVMessage) {
-        let data = msg.encode();
-        let writer = self.writer.clone();
+impl Client {
+    pub fn new(stream: TcpStream, handler: Arc<EventHandler>) -> Arc<Self> {
+        let (reader, writer) = stream.into_split();
+        let (write_tx, read_rx) = unbounded_channel::<TLVMessage>();
 
+        let client = Arc::new(Self {
+            id: Bytes::copy_from_slice(Uuid::new_v4().as_bytes()),
+            write_tx,
+            cancel_token: CancellationToken::new(),
+            is_peer: AtomicBool::new(false),
+            handler: handler.clone(),
+        });
+
+        // Subscribe to public channels
+        handler.handle_subscribe_public(client.id());
+
+        // Start read and write tasks
+        let client_read = client.clone();
+        let handler_read = handler.clone();
         tokio::spawn(async move {
-            match writer.try_lock() {
-                Ok(mut w) => {
-                    if let Err(e) = w.write_all(&data).await {
-                        error!("Peer send error: {}", e);
-                    } else {
-                        let _ = w.flush().await;
-                        debug!("Peer message sent: {} bytes", data.len());
-                    }
-                }
-                Err(_) => error!("Peer writer busy"),
+            if let Err(e) = Client::read_task(client_read, reader, handler_read).await {
+                warn!("Read task error: {:?}", e);
             }
         });
-    }
-}
 
-/// ClientSender
-pub struct WriterClientSender {
-    writer: Arc<tokio::sync::Mutex<WriteHalf<TcpStream>>>,
-}
-
-impl ClientSender for WriterClientSender {
-    fn send(&self, msg: &TLVMessage) {
-        let data = msg.encode();
-        let writer = self.writer.clone();
-
+        let client_write = client.clone();
         tokio::spawn(async move {
-            match writer.try_lock() {
-                Ok(mut w) => {
-                    if let Err(e) = w.write_all(&data).await {
-                        error!("Client send error: {}", e);
-                    } else {
-                        let _ = w.flush().await;
-                        debug!("Client message sent: {} bytes", data.len());
-                    }
-                }
-                Err(_) => error!("Client writer busy"),
+            if let Err(e) = Client::write_task(writer, read_rx).await {
+                warn!("Write task error: {:?}", e);
             }
         });
-    }
-}
 
-/// Handler für eingehende Verbindungen
-pub async fn handle_connection(stream: TcpStream, handler: Arc<EventHandler>) -> std::io::Result<()> {
-    stream.set_nodelay(true)?;
-    let (mut reader, writer) = split(stream);
-    let writer = Arc::new(tokio::sync::Mutex::new(writer));
-    let client_id = rand::rng().next_u64() as ClientId;
-
-    let client_sender = Arc::new(WriterClientSender { writer: writer.clone() });
-    handler.clients.register(client_id, client_sender);
-    info!("🔌 Client-ID {client_id} verbunden");
-
-    for topic in &handler.public_topics {
-        handler.handle_subscribe(topic, client_id);
-        info!("📡 Auto-Subscribed: {}", String::from_utf8_lossy(topic));
+        client
     }
 
-    let mut peer_id: Option<String> = None;
 
-    // Erste Nachricht lesen
-    if let Some(msg) = read_message(&mut reader).await {
-        match msg.event_type {
-            EventType::SyncInit => {
-                if let Some(raw) = msg.get_field(FieldType::Key) {
-                    if let Ok(id_str) = std::str::from_utf8(raw) {
-                        let id = id_str.to_string();
-                        peer_id = Some(id.clone());
-
-                        let peer_sender = Arc::new(WriterPeerSender { writer: writer.clone() });
-                        handler.peers.register(id.clone(), peer_sender);
-
-                        let mut ack = TLVMessage::new(EventType::SyncAck);
-                        ack.insert_field(FieldType::Key, Bytes::copy_from_slice(id.as_bytes()));
-                        handler.peers.get(&id).map(|s| s.send(&ack));
-                        info!("✅ SyncAck sent to {}", id);
-                    }
-                }
-            }
-            EventType::SyncAck => {
-                if let Some(raw) = msg.get_field(FieldType::Key) {
-                    if let Ok(id_str) = std::str::from_utf8(raw) {
-                        let id = id_str.to_string();
-                        peer_id = Some(id.clone());
-
-                        if !handler.peers.contains(&id) {
-                            let sender = Arc::new(WriterPeerSender { writer: writer.clone() });
-                            handler.peers.register(id.clone(), sender);
-                        }
-
-                        info!("🔄 SyncAck received from {}", id);
-                    }
-                }
-            }
-            EventType::Subscribe => {
-                if let Some(topic) = msg.get_field(FieldType::Key) {
-                    handler.handle_subscribe(topic, client_id);
-                }
-            }
-            _ => {
-                handler.handle_event(&msg, peer_id.as_deref(), Some(client_id));
-            }
+    async fn read_task(client: Arc<Client>, reader: OwnedReadHalf, handler: Arc<EventHandler>) -> Result<(), ReplicashError> {
+        tokio::select! {
+            _ = client.cancel_token.cancelled() => Ok(()),
+            res = Client::read(client.clone(), reader, handler) => res,
         }
-    } else {
-        handler.clients.unregister(client_id);
-        return Ok(());
     }
 
-    // Haupt-Loop
-    loop {
-        match read_message(&mut reader).await {
-            Some(msg) => {
-                match msg.event_type {
-                    EventType::Subscribe => {
-                        if let Some(topic) = msg.get_field(FieldType::Key) {
-                            handler.handle_subscribe(topic, client_id);
+    async fn read(client: Arc<Client>, mut reader: OwnedReadHalf, handler: Arc<EventHandler>) -> Result<(), ReplicashError> {
+        debug!("Starting read loop for client {:?}", client.id);
+        loop {
+            debug!("Waiting for message from client {:?}", client.id);
+            let mut len_buf = [0u8; 4];
+            match reader.read_exact(&mut len_buf).await {
+                Ok(_) => {
+                    let len = u32::from_be_bytes(len_buf) as usize;
+                    debug!("Received message header, length: {} bytes", len);
+
+                    let mut full = BytesMut::with_capacity(len );
+                    full.extend_from_slice(&len_buf);
+                    full.resize(len , 0);
+
+                    match reader.read_exact(&mut full[4..]).await {
+                        Ok(_) => {
+                            debug!("Received complete message of {} bytes", full.len());
+                            let raw = full.freeze();
+
+                            match TLVMessage::extract_event(&raw) {
+                                Ok(event) => {
+                                    info!("Processing event type: {:?} from client {:?}", event, client.id);
+
+                                    match event {
+                                        EventType::SyncInit => {
+                                            debug!("Handling SyncInit event");
+                                            handle_sync_init(handler.clone(), client.clone(), &raw).await
+                                        },
+                                        EventType::SyncAck => {
+                                            debug!("Handling SyncAck event");
+                                            handle_sync_ack(handler.clone(), client.clone(), &raw).await
+                                        },
+                                        EventType::Subscribe => {
+                                            debug!("Handling Subscribe event");
+                                            handle_subscribe(handler.clone(), client.clone(), &raw).await
+                                        },
+                                        EventType::Unsubscribe => {
+                                            debug!("Handling Unsubscribe event");
+                                            handle_unsubscribe(handler.clone(), client.clone(), &raw).await
+                                        },
+                                        EventType::Event => {
+                                            debug!("Handling Event event");
+                                            handle_event(handler.clone(), client.clone(), &raw).await
+                                        },
+                                        _ => {
+                                            error!("Unknown event type: {:?}", event);
+                                            return Err(ReplicashError::new(ErrorCode::InvalidEventType, "Unknown EventType"))
+                                        },
+                                    }
+                                },
+                                Err(e) => {
+                                    error!("Failed to extract event type: {}", e);
+                                    return Err(e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            error!("Failed to read message body: {}", e);
+                            return Err(ReplicashError::new(ErrorCode::ReadFailed, "Connection failed"));
                         }
                     }
-                    _ => {
-                        handler.handle_event(&msg, peer_id.as_deref(), Some(client_id));
-                    }
+                },
+                Err(e) => {
+                    error!("Failed to read message header: {}", e);
+                    return Err(ReplicashError::new(ErrorCode::ReadFailed, "Connection failed"));
                 }
-            }
-            None => {
-                if let Some(id) = peer_id {
-                    handler.peers.unregister(&id);
-                } else {
-                    handler.clients.unregister(client_id);
-                }
-                break;
             }
         }
     }
 
-    Ok(())
+    pub fn send(&self, tlv: &TLVMessage) -> Result<(), ReplicashError> {
+        debug!("Sending message with event type {:?} to client {:?}", tlv.event_type, self.id);
+        match self.write_tx.send(tlv.clone()) {
+            Ok(_) => {
+                debug!("Message sent successfully to client {:?}", self.id);
+                Ok(())
+            },
+            Err(e) => {
+                error!("Failed to send message to client {:?}: {}", self.id, e);
+                Err(ReplicashError::new(ErrorCode::InternalServerError, "Failed to send message"))
+            }
+        }
+    }
+
+    // Alias for send method to maintain compatibility with existing code
+    pub fn send_tlv(&self, tlv: &TLVMessage) -> Result<(), ReplicashError> {
+        debug!("Using send_tlv alias for client {:?}", self.id);
+        self.send(tlv)
+    }
+
+    async fn write_task(mut writer: OwnedWriteHalf, mut rx: UnboundedReceiver<TLVMessage>) -> Result<(), ReplicashError> {
+        debug!("Starting write task");
+        while let Some(data) = rx.recv().await {
+            debug!("Writing message with event type {:?}", data.event_type);
+            let encoded = data.encode();
+            match writer.write_all(&encoded).await {
+                Ok(_) => {
+                    debug!("Successfully wrote {} bytes", encoded.len());
+                },
+                Err(e) => {
+                    error!("Failed to write message: {}", e);
+                    return Err(ReplicashError::new(ErrorCode::WriteFailed, "Connection failed"));
+                }
+            }
+        }
+        info!("Write task completed");
+        Ok(())
+    }
+
+    pub fn is_peer(&self) -> bool {
+        let is_peer = self.is_peer.load(Ordering::Relaxed);
+        debug!("Checking if client {:?} is peer: {}", self.id, is_peer);
+        is_peer
+    }
+
+    pub fn set_peer(&self, is_peer: bool) {
+        debug!("Setting client {:?} peer status to: {}", self.id, is_peer);
+        self.is_peer.store(is_peer, Ordering::Relaxed);
+    }
+
+    pub fn close(&self) {
+        info!("Closing connection for client {:?}", self.id);
+        // Close the connection with a proper TLVMessage
+        let close_msg = TLVMessage::new(EventType::Ok);
+        debug!("Sending close message to client {:?}", self.id);
+        match self.write_tx.send(close_msg) {
+            Ok(_) => debug!("Close message sent successfully"),
+            Err(e) => warn!("Failed to send close message: {}", e),
+        }
+
+        // Cancel the read task
+        debug!("Cancelling read task for client {:?}", self.id);
+        self.cancel_token.cancel();
+        info!("Connection closed for client {:?}", self.id);
+    }
+
+    pub fn id(&self) -> Bytes {
+        self.id.clone()
+    }
 }
 
-/// Hilfsfunktion: liest eine vollständige Nachricht mit Header
-async fn read_message(reader: &mut (impl AsyncReadExt + Unpin)) -> Option<TLVMessage> {
-    let mut len_buf = [0u8; 4];
-    if reader.read_exact(&mut len_buf).await.is_err() {
-        return None;
+impl Drop for Client {
+    fn drop(&mut self) {
+        info!("Client {:?} dropped, cleaning up resources", self.id);
+
+        // Close the connection if it's not already closed
+        self.close();
+
+        // Clean up all subscriptions and unregister from the connection registry
+        self.handler.handle_client_disconnect(self.id.clone());
+
+        info!("Client {:?} cleanup completed", self.id);
     }
-
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len < 5 || len > MAX_MESSAGE_SIZE {
-        warn!("⚠️ Ungültige Länge: {}, Dump: {:?}", len, len_buf);
-        return None;
-    }
-
-    let mut rest = vec![0u8; len - 4]; // jetzt korrekt: event_type + tlv payload
-    if reader.read_exact(&mut rest).await.is_err() {
-        return None;
-    }
-
-    let mut full = Vec::with_capacity(len);
-    full.extend_from_slice(&len_buf);
-    full.extend_from_slice(&rest);
-
-    debug!("📥 Vollständiger Nachricht-Buffer: {:?}", full);
-
-    TLVMessage::parse(Bytes::from(full)).ok()
 }

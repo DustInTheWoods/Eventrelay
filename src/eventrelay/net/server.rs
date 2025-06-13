@@ -3,26 +3,22 @@ use std::sync::Arc;
 use log::{info, warn};
 
 use crate::eventrelay::handler::EventHandler;
-use crate::eventrelay::net::connection::handle_connection;
+use crate::eventrelay::net::connection::{Client};
 
-/// Startet den TCP-Listener (als Platzhalter für echten QUIC)
+/// Starts the TCP listener (as a placeholder for real QUIC)
 pub async fn run_event_server(addr: &str, handler: Arc<EventHandler>) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    info!("📡 Event server running on {}", addr);
+    info!("Event server running on {}", addr);
 
     loop {
-        let (mut stream, addr) = listener.accept().await?;
+        let (stream, addr) = listener.accept().await?;
         // Set TCP_NODELAY to true to disable Nagle's algorithm
         if let Err(e) = stream.set_nodelay(true) {
-            warn!("⚠️ Failed to set TCP_NODELAY for connection from {}: {}", addr, e);
+            warn!("Failed to set TCP_NODELAY for connection from {}: {}", addr, e);
         }
-        info!("🔌 New connection from {}", addr);
+        info!("New connection from {}", addr);
 
-        let handler = handler.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, handler).await {
-                warn!("⚠️ Connection error for {}: {:?}", addr, e);
-            }
-        });
+        let client = Client::new(stream, handler.clone());
+        handler.clients.register_client(client.id(), client);
     }
 }

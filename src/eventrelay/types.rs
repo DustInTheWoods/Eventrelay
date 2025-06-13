@@ -1,11 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
+use bytes::Bytes;
+use dashmap::DashMap;
 
-/// Client Identifier Typ
-pub type ClientId = u64;
-
-/// Topic = raw Bytes
-pub type Topic = Arc<Vec<u8>>;
+/// Topic = raw Vec<u8>
+pub type Topic = Vec<u8>;
 
 /// Mapping: Topic → Liste von Clients
-pub type Subscriptions = HashMap<Topic, HashSet<ClientId>>;
+pub type Subscriptions = DashMap<Topic, HashSet<Bytes>>;

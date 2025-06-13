@@ -11,30 +11,34 @@ use crate::eventrelay::config;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     // Protocol errors (0x0001-0x0100)
-    InvalidEventType = 0x0001,
-    MalformedTlv = 0x0002,
-    IncompleteMessage = 0x0003,
-    UnsupportedVersion = 0x0004,
+    InvalidEventType = 0x01,
+    MalformedTlv = 0x02,
+    IncompleteMessage = 0x03,
+    UnsupportedVersion = 0x04,
 
     // Application errors (0x0101-0x0200)
-    KeyNotFound = 0x0101,
-    TtlExpired = 0x0102,
-    ValueTooLarge = 0x0103,
-    DiskWriteFailed = 0x0104,
+    KeyNotFound = 0x11,
+    TtlExpired = 0x12,
+    ValueTooLarge = 0x13,
+    DiskWriteFailed = 0x14,
 
     // Cluster/State errors (0x0201-0x0300)
-    ReadonlyMode = 0x0201,
-    MasterUnavailable = 0x0202,
-    SyncDenied = 0x0203,
+    ReadonlyMode = 0x21,
+    MasterUnavailable = 0x22,
+    SyncDenied = 0x23,
 
     // System errors (0x0301-0x0400)
-    InternalServerError = 0x0301,
-    ConfigInvalid = 0x0302,
+    InternalServerError = 0x31,
+    ConfigInvalid = 0x32,
 
     // Client errors (0x0401-0x0500)
-    ConnectionFailed = 0x0401,
-    SendFailed = 0x0402,
-    NotConnected = 0x0403,
+    ConnectionFailed = 0x41,
+    SendFailed = 0x42,
+    NotConnected = 0x43,
+
+    // IO errors (0x0501-0x0600)
+    ReadFailed = 0x51,
+    WriteFailed = 0x52,
 }
 
 impl ErrorCode {
@@ -78,29 +82,6 @@ impl ErrorCode {
         }
     }
 
-    /// Try to convert a u16 to an ErrorCode
-    pub fn from_u16(code: u16) -> Option<Self> {
-        match code {
-            0x0001 => Some(Self::InvalidEventType),
-            0x0002 => Some(Self::MalformedTlv),
-            0x0003 => Some(Self::IncompleteMessage),
-            0x0004 => Some(Self::UnsupportedVersion),
-            0x0101 => Some(Self::KeyNotFound),
-            0x0102 => Some(Self::TtlExpired),
-            0x0103 => Some(Self::ValueTooLarge),
-            0x0104 => Some(Self::DiskWriteFailed),
-            0x0201 => Some(Self::ReadonlyMode),
-            0x0202 => Some(Self::MasterUnavailable),
-            0x0203 => Some(Self::SyncDenied),
-            0x0301 => Some(Self::InternalServerError),
-            0x0302 => Some(Self::ConfigInvalid),
-            0x0401 => Some(Self::ConnectionFailed),
-            0x0402 => Some(Self::SendFailed),
-            0x0403 => Some(Self::NotConnected),
-            _ => None,
-        }
-    }
-
     /// Get a human-readable description of the error code
     pub fn description(&self) -> &'static str {
         match self {
@@ -120,6 +101,8 @@ impl ErrorCode {
             Self::ConnectionFailed => "Failed to connect to server",
             Self::SendFailed => "Failed to send message",
             Self::NotConnected => "Client is not connected",
+            Self::ReadFailed => "Failed to read from connection",
+            Self::WriteFailed => "Failed to write to connection",
         }
     }
 }
@@ -143,6 +126,8 @@ impl fmt::Display for ErrorCode {
             Self::ConnectionFailed => "CONNECTION_FAILED",
             Self::SendFailed => "SEND_FAILED",
             Self::NotConnected => "NOT_CONNECTED",
+            Self::ReadFailed => "READ_FAILED",
+            Self::WriteFailed => "WRITE_FAILED",
         };
         write!(f, "{} (0x{:04X})", name, *self as u8)
     }

@@ -1,98 +1,135 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::collections::HashSet;
 
-use log::{debug, info, trace};
-use crate::eventrelay::types::{ClientId, Topic, Subscriptions};
+use log::{debug, info};
+use bytes::Bytes;
+use crate::eventrelay::types::{Topic, Subscriptions};
+use dashmap::DashMap;
 
-/// Speichert Subscriptions Thread-sicher
+/// Stores subscriptions in a thread-safe manner
 #[derive(Default)]
 pub struct SubscriptionManager {
-    inner: RwLock<Subscriptions>,
+    inner: Subscriptions,
+    public_topics: Vec<Bytes>,
 }
 
 impl SubscriptionManager {
-    pub fn new() -> Self {
+    pub fn new(public_topics: Vec<Bytes>) -> Self {
         Self {
-            inner: RwLock::new(HashMap::new()),
+            inner: DashMap::new(),
+            public_topics,
         }
     }
 
-    /// Fügt eine Subscription hinzu
-    pub fn subscribe(&self, topic: &[u8], client_id: ClientId) {
-        let topic_str = String::from_utf8_lossy(topic);
-        info!("Adding subscription: client {} to topic {}", client_id, topic_str);
+    /// Adds a subscription
+    pub fn subscribe(&self, topic: &[u8], client_id: Bytes) {
+        debug!("Adding subscription for client {:?} to topic", client_id);
 
-        let topic_key = Arc::new(topic.to_vec());
-        let mut subs = self.inner.write().unwrap();
+        // Create the topic key
+        let topic_key = topic.to_vec();
 
-        let is_new_topic = !subs.contains_key(&topic_key);
-        if is_new_topic {
-            debug!("Creating new topic entry for: {}", topic_str);
-        }
+        // Use entry API for atomic operations
+        self.inner.entry(topic_key).or_insert_with(HashSet::new).insert(client_id.clone());
 
-        let client_set = subs.entry(topic_key)
-            .or_insert_with(HashSet::new);
-
-        let already_subscribed = !client_set.insert(client_id);
-        if already_subscribed {
-            debug!("Client {} was already subscribed to topic {}", client_id, topic_str);
-        }
-
-        trace!("Current subscription count for topic {}: {}", topic_str, client_set.len());
+        debug!("Added client {:?} to topic", client_id);
     }
 
-    /// Entfernt eine Subscription
-    pub fn unsubscribe(&self, topic: &[u8], client_id: ClientId) {
-        let topic_str = String::from_utf8_lossy(topic);
-        info!("Removing subscription: client {} from topic {}", client_id, topic_str);
+    pub fn subscribe_public(&self, client_id: Bytes) {
+        info!("Client {:?} subscribing to all public topics", client_id);
+        
+        for topic in self.public_topics.iter() {
+            debug!("Subscribing client {:?} to public topic", client_id);
+            self.subscribe(topic, client_id.clone());
+        }
+        
+        info!("Client {:?} subscribed to all public topics", client_id);
+    }
 
-        let topic_key = Arc::new(topic.to_vec());
-        let mut subs = self.inner.write().unwrap();
+    /// Removes a subscription
+    pub fn unsubscribe(&self, topic: &[u8], client_id: Bytes) {
+        debug!("Removing subscription for client {:?} from topic", client_id);
 
-        if let Some(set) = subs.get_mut(&topic_key) {
-            let was_subscribed = set.remove(&client_id);
-            if !was_subscribed {
-                debug!("Client {} was not subscribed to topic {}", client_id, topic_str);
+        // Create the topic key
+        let topic_key = topic.to_vec();
+
+        // Use entry API for atomic operations
+        if let Some(mut entry) = self.inner.get_mut(&topic_key) {
+            entry.remove(&client_id);
+            debug!("Removed client {:?} from topic", client_id);
+
+            // If the set is empty, remove the topic
+            if entry.is_empty() {
+                drop(entry); // Release the reference before removing
+                self.inner.remove(&topic_key);
+                debug!("Removed empty topic");
             }
+        }
 
-            trace!("Remaining subscription count for topic {}: {}", topic_str, set.len());
+        debug!("Topic not found for unsubscribe");
+    }
 
-            if set.is_empty() {
-                debug!("Removing empty topic: {}", topic_str);
-                subs.remove(&topic_key);
-            }
+    pub fn unsubscribe_public(&self, client_id: Bytes) {
+        info!("Client {:?} unsubscribing from all public topics", client_id);
+        
+        for topic in self.public_topics.iter() {
+            debug!("Unsubscribing client {:?} from public topic", client_id);
+            self.unsubscribe(topic, client_id.clone());
+        }
+        
+        info!("Client {:?} unsubscribed from all public topics", client_id);
+    }
+
+    /// Returns all clients that have subscribed to a topic
+    pub fn clients_for_topic(&self, topic: &[u8]) -> Vec<Bytes> {
+        debug!("Getting clients for topic");
+
+        // Create the topic key
+        let topic_key = topic.to_vec();
+
+        // Direct lookup using the key
+        if let Some(entry) = self.inner.get(&topic_key) {
+            // Pre-allocate the vector with the exact size needed
+            let mut clients = Vec::with_capacity(entry.len());
+            clients.extend(entry.iter().cloned());
+            debug!("Found {} clients for topic", clients.len());
+            clients
         } else {
-            debug!("Topic {} does not exist, nothing to unsubscribe", topic_str);
+            debug!("No clients found for topic");
+            Vec::new()
         }
-    }
-
-    /// Gibt alle Clients zurück, die ein Topic abonniert haben
-    pub fn clients_for_topic(&self, topic: &[u8]) -> Vec<ClientId> {
-        let topic_str = String::from_utf8_lossy(topic);
-        debug!("Getting subscribed clients for topic: {}", topic_str);
-
-        let topic_key = Arc::new(topic.to_vec());
-        let subs = self.inner.read().unwrap();
-
-        let result = subs.get(&topic_key)
-            .map(|set| {
-                let clients: Vec<ClientId> = set.iter().copied().collect();
-                trace!("Found {} clients subscribed to topic {}", clients.len(), topic_str);
-                clients
-            })
-            .unwrap_or_else(|| {
-                debug!("No subscriptions found for topic {}", topic_str);
-                Vec::new()
-            });
-
-        result
     }
 
     /// Gibt alle Subscriptions zurück (z. B. für Debug oder Broadcast-Checks)
-    pub fn all(&self) -> HashMap<Topic, HashSet<ClientId>> {
+    pub fn all(&self) -> DashMap<Topic, HashSet<Bytes>> {
         debug!("Retrieving all subscriptions");
-        let subs = self.inner.read().unwrap().clone();
-        info!("Total topics with subscriptions: {}", subs.len());
-        subs
+        self.inner.clone()
+    }
+
+    /// Unsubscribes a client from all topics
+    pub fn unsubscribe_all(&self, client_id: Bytes) {
+        info!("Client {:?} unsubscribing from all topics", client_id);
+
+        // First unsubscribe from all public topics
+        self.unsubscribe_public(client_id.clone());
+
+        // Then unsubscribe from all other topics
+        // We need to collect the topics first to avoid modifying the map while iterating
+        let topics_to_unsubscribe: Vec<Topic> = self.inner
+            .iter()
+            .filter_map(|entry| {
+                if entry.value().contains(&client_id) {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Now unsubscribe from each topic
+        for topic in topics_to_unsubscribe {
+            debug!("Unsubscribing client {:?} from topic", client_id);
+            self.unsubscribe(&topic, client_id.clone());
+        }
+
+        info!("Client {:?} unsubscribed from all topics", client_id);
     }
 }

@@ -1,108 +1,107 @@
-use crate::tlv::types;
 use crate::eventrelay::subscriptions::SubscriptionManager;
-use crate::eventrelay::client::ClientRegistry;
-use crate::eventrelay::broadcaster::PeerRegistry;
-use crate::eventrelay::types::*;
+use crate::eventrelay::broadcaster::ConnectionRegistry;
 
 use std::sync::Arc;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
+use bytes::Bytes;
 use crate::tlv::message::TLVMessage;
-use crate::tlv::types::{EventType, FieldType};
 
-/// Verwaltet Event-Verteilung im Cluster
+/// Manages event distribution in the cluster
+
 pub struct EventHandler {
     pub subscriptions: Arc<SubscriptionManager>,
-    pub clients: Arc<ClientRegistry>,
-    pub peers: Arc<PeerRegistry>,
-    pub public_topics: Vec<Vec<u8>>, // z. B. "chat/global"
-    pub enable_subscriptions: bool,
+    pub clients: Arc<ConnectionRegistry>,
+    pub public_topics: Vec<Vec<u8>>, 
 }
 
 impl EventHandler {
     pub fn new(
         subscriptions: Arc<SubscriptionManager>,
-        clients: Arc<ClientRegistry>,
-        peers: Arc<PeerRegistry>,
+        clients: Arc<ConnectionRegistry>,
         public_topics: Vec<Vec<u8>>,
-        enable_subscriptions: bool,
     ) -> Self {
         Self {
             subscriptions,
             clients,
-            peers,
             public_topics,
-            enable_subscriptions,
         }
     }
 
-    /// Wird aufgerufen, wenn ein Event eingeht
-    pub fn handle_event(&self, msg: &TLVMessage, source_peer: Option<&str>, source_client: Option<ClientId>) {
-        info!("Handling incoming event from peer: {:?}, client: {:?}", source_peer, source_client);
-
-        if let Some(peer_id) = source_peer {
-            debug!("📥 Received message from server: {}", peer_id);
+    /// Called when an event is received
+    pub fn handle_event(&self, topic: &[u8], msg: &TLVMessage, source_peer: Option<Bytes>, source_client: Option<Bytes>) {
+        // Reduce logging in this performance-critical path
+        if log::log_enabled!(log::Level::Info) {
+            info!("Handling incoming event from peer: {:?}, client: {:?}", source_peer, source_client);
         }
 
-        let topic = match msg.get_field(FieldType::Key) {
-            Some(val) => {
-                let topic_ref = val.as_ref();
-                debug!("Event topic: {:?}", String::from_utf8_lossy(topic_ref));
-                topic_ref
-            },
-            None => {
-                warn!("Event ohne Topic-Key erhalten");
-                return;
+        if let Some(ref peer_id) = source_peer {
+            debug!("Received message from server: {:?}", peer_id);
+        }
+
+        // Local clients
+        // Always send it to subscribed clients first
+        let client_ids = self.subscriptions.clients_for_topic(topic);
+
+        debug!("Sending to {} subscribed clients (excluding source: {:?})", client_ids.len(), source_client);
+
+        // Send to each subscribed client
+        for client_id in &client_ids {
+            if Some(client_id) != source_client.as_ref() {
+                if let Some(client) = self.clients.get_client(client_id) {
+                    if let Err(e) = client.send_tlv(msg) {
+                        error!("Failed to send message to client {:?}: {}", client_id, e);
+                    }
+                }
             }
-        };
-
-        let is_public = self.public_topics.iter().any(|t| t == topic);
-        debug!("Topic is public: {}", is_public);
-
-        // Lokale Clients
-        if self.enable_subscriptions {
-            // Immer zuerst an abonnierte Clients senden
-            let client_ids = self.subscriptions.clients_for_topic(topic);
-            debug!("Sending to {} subscribed clients (excluding source: {:?})", client_ids.len(), source_client);
-            self.clients.send_to_except(&client_ids, msg, source_client);
-        } else {
-            debug!("Subscriptions disabled, broadcasting to all local clients (excluding source: {:?})", source_client);
-            self.clients.broadcast_except(msg, source_client);
         }
 
-        // Weiterleiten an andere Server, aber nur wenn die Nachricht nicht von einem Server kommt
+        // Forward to other servers, but only if the message doesn't come from a server
         if source_peer.is_none() {
             debug!("Forwarding event to other servers");
-            self.peers.broadcast_to_peers(msg, None);
-        } else {
-            debug!("Not forwarding server-originated event to other servers");
+            self.clients.broadcast_to_peers(msg, None);
         }
+        debug!("Not forwarding server-originated event to other servers");
 
         info!("Event handling completed");
     }
 
-    /// Wird aufgerufen, wenn ein Client ein Topic abonniert
-    pub fn handle_subscribe(&self, topic: &[u8], client_id: ClientId) {
-        let topic_str = String::from_utf8_lossy(topic);
-        info!("Client {} subscribing to topic: {}", client_id, topic_str);
-
-        if self.enable_subscriptions {
-            debug!("Subscriptions enabled, adding subscription");
-            self.subscriptions.subscribe(topic, client_id);
-        } else {
-            debug!("Subscriptions disabled, ignoring subscription request");
-        }
+    pub fn handle_subscribe(&self, topic: &[u8], client_id: Bytes) {
+        info!("Client {:?} subscribing to topic", client_id);
+        self.subscriptions.subscribe(topic, client_id);
     }
 
-    /// Optional: explizite Unsubscription
-    pub fn handle_unsubscribe(&self, topic: &[u8], client_id: ClientId) {
-        let topic_str = String::from_utf8_lossy(topic);
-        info!("Client {} unsubscribing from topic: {}", client_id, topic_str);
+    pub fn handle_unsubscribe(&self, topic: &[u8], client_id: Bytes) {
+        info!("Client {:?} unsubscribing from topic", client_id);
+        self.subscriptions.unsubscribe(topic, client_id);
+    }
 
-        if self.enable_subscriptions {
-            debug!("Subscriptions enabled, removing subscription");
-            self.subscriptions.unsubscribe(topic, client_id);
-        } else {
-            debug!("Subscriptions disabled, ignoring unsubscription request");
+    pub fn handle_subscribe_public(&self, client_id: Bytes) {
+        info!("Client {:?} subscribing to public topic", client_id);
+        self.subscriptions.subscribe_public(client_id);
+    }
+
+    pub fn handle_unsubscribe_public(&self, client_id: Bytes) {
+        info!("Client {:?} unsubscribing from public topic", client_id);
+        self.subscriptions.unsubscribe_public(client_id);
+    }
+
+    /// Handles cleanup when a client disconnects
+    /// This unsubscribes the client from all topics and unregisters it from the connection registry
+    pub fn handle_client_disconnect(&self, client_id: Bytes) {
+        info!("Handling disconnect for client {:?}", client_id);
+
+        // Unsubscribe from all topics
+        self.subscriptions.unsubscribe_all(client_id.clone());
+
+        // Unregister from the connection registry
+        if self.clients.contains_client(&client_id) {
+            self.clients.unregister_client(&client_id);
+            info!("Client {:?} unregistered from connection registry", client_id);
+        } else if self.clients.contains_peer(&client_id) {
+            self.clients.unregister_peer(&client_id);
+            info!("Peer {:?} unregistered from connection registry", client_id);
         }
+
+        info!("Client {:?} cleanup completed", client_id);
     }
 }

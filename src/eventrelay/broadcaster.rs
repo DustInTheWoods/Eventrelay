@@ -1,74 +1,104 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-use log::{debug, info, warn};
+use dashmap::DashMap;
+use std::sync::Arc;
+use bytes::Bytes;
+use log::{debug, error, info, warn};
+use crate::eventrelay::net::connection::Client;
 use crate::tlv::message::TLVMessage;
 
-/// Trait für eine Verbindung zu einem Peer-Server
-pub trait PeerSender: Send + Sync {
-    fn send(&self, msg: &TLVMessage);
+/// Registry for active peer connections
+pub struct ConnectionRegistry {
+    peers: DashMap<Bytes, Arc<Client>>,
+    clients: DashMap<Bytes, Arc<Client>>,
 }
 
-/// Registry für aktive Serververbindungen
-pub struct PeerRegistry {
-    pub(crate) peers: Mutex<HashMap<String, Arc<dyn PeerSender>>>, // Key = Peer-ID oder IP
-}
-
-impl PeerRegistry {
+impl ConnectionRegistry {
     pub fn new() -> Self {
         Self {
-            peers: Mutex::new(HashMap::new()),
+            peers: DashMap::new(),
+            clients: DashMap::new(),
         }
     }
 
-    pub fn register(&self, id: String, sender: Arc<dyn PeerSender>) {
-        info!("Registering peer with ID: {}", id);
-        self.peers.lock().unwrap().insert(id, sender);
+    pub fn register_peer(&self, id: Bytes, client: Arc<Client>) {
+        info!("Registering peer with ID: {:?}", id);
+        self.peers.insert(id, client);
     }
 
-    pub fn unregister(&self, id: &str) {
-        info!("Unregistering peer with ID: {}", id);
-        self.peers.lock().unwrap().remove(id);
+    pub fn register_client(&self, id: Bytes, client: Arc<Client>) {
+        info!("Registering client with id: {:?}", id);
+        self.clients.insert(id, client);
     }
 
-    /// Broadcastet die Nachricht an alle Peers außer dem angegebenen Ursprungsserver
-    pub fn broadcast_to_peers(&self, msg: &TLVMessage, exclude_peer_id: Option<&str>) {
-        let peers = self.peers.lock().unwrap();
-        let peer_count = peers.len();
-        debug!("Broadcasting message to {} peers (excluding: {:?})", peer_count, exclude_peer_id);
+    pub fn unregister_peer(&self, id: &Bytes) {
+        info!("Unregistering peer with ID: {:?}", id);
+        self.peers.remove(id);
+    }
 
-        let mut sent_count = 0;
-        for (id, sender) in peers.iter() {
-            if Some(id.as_str()) != exclude_peer_id {
-                debug!("Sending message to peer: {}", id);
-                sender.send(msg);
-                sent_count += 1;
+    pub fn unregister_client(&self, id: &Bytes) {
+        info!("Unregistering client with id: {:?}", id);
+        self.clients.remove(id);
+    }
+
+    pub fn broadcast_to_peers(&self, msg: &TLVMessage, exclude_peer_id: Option<&Bytes>) {
+        debug!("Broadcasting message to {} peers", self.peers.len());
+
+        // For all peers, use regular iteration with conditional logging
+        for peer in self.peers.iter() {
+            if Some(peer.key()) != exclude_peer_id {
+                if let Err(e) = peer.value().send_tlv(msg) {
+                    error!("Failed to send message: {}, to peer: {:?}", e, peer.key());
+                }
             }
         }
 
-        debug!("Message broadcast completed. Sent to {}/{} peers", sent_count, peer_count);
+        debug!("Broadcast to peers completed");
     }
 
-    /// Optional: explizit an bestimmten Peer senden
-    pub fn send_to(&self, peer_id: &str, msg: &TLVMessage) {
-        debug!("Attempting to send message to specific peer: {}", peer_id);
-        if let Some(sender) = self.peers.lock().unwrap().get(peer_id) {
-            debug!("Sending message to peer: {}", peer_id);
-            sender.send(msg);
-        } else {
-            warn!("Failed to send message: Peer not found with ID: {}", peer_id);
+    pub fn broadcast_to_clients(&self, msg: &TLVMessage, exclude_client_id: Option<&Bytes>) {
+        debug!("Broadcasting message to {} clients", self.clients.len());
+
+        // For all clients, use regular iteration with conditional logging
+        for client in self.clients.iter() {
+            if Some(client.key()) != exclude_client_id {
+                if let Err(e) = client.value().send_tlv(msg) {
+                    error!("Failed to send message: {}, to client: {:?}", e, client.key());
+                }           
+            }
         }
+
+        debug!("Broadcast to clients completed");
     }
 
-    /// Gibt den Sender für einen bestimmten Peer zurück
-    pub fn get(&self, peer_id: &str) -> Option<Arc<dyn PeerSender>> {
-        debug!("Getting peer with ID: {}", peer_id);
-        self.peers.lock().unwrap().get(peer_id).cloned()
+    pub fn get_peer(&self, peer_id: &Bytes) -> Option<Arc<Client>> {
+        let result = self.peers.get(peer_id).map(|entry| entry.value().clone());
+        if result.is_some() {
+            debug!("Found peer with ID: {:?}", peer_id);
+        } else {
+            debug!("Peer with ID: {:?} not found", peer_id);
+        }
+        result
     }
 
-    /// Prüft, ob ein Peer mit der angegebenen ID existiert
-    pub fn contains(&self, peer_id: &str) -> bool {
-        debug!("Checking if peer exists with ID: {}", peer_id);
-        self.peers.lock().unwrap().contains_key(peer_id)
+    pub fn get_client(&self, client_id: &Bytes) -> Option<Arc<Client>> {
+        let result = self.clients.get(client_id).map(|entry| entry.value().clone());
+        if result.is_some() {
+            debug!("Found client with ID: {:?}", client_id);
+        } else {
+            debug!("Client with ID: {:?} not found", client_id);
+        }
+        result
+    }
+
+    pub fn contains_peer(&self, peer_id: &Bytes) -> bool {
+        let contains = self.peers.contains_key(peer_id);
+        debug!("Checking if peer with ID: {:?} exists: {}", peer_id, contains);
+        
+        contains
+    }
+
+    pub fn contains_client(&self, client_id: &Bytes) -> bool {
+        let contains = self.clients.contains_key(client_id);
+        debug!("Checking if client with ID: {:?} exists: {}", client_id, contains);
+        contains
     }
 }
