@@ -1,11 +1,8 @@
-use std::io::{stdin, stdout, Write};
-use std::time::Duration;
 use tokio::task;
-use log::{info, error, debug, warn, trace, LevelFilter};
+use log::{info, error, debug, warn, trace};
 use env_logger::{self, Builder, Env};
 use Eventrelay::eventrelay::config::ServerConfig;
 use Eventrelay::eventrelay::init;
-use Eventrelay::error::ReplicashError;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {

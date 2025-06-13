@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 use bytes::Bytes;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use crate::eventrelay::net::connection::Client;
 use crate::tlv::message::TLVMessage;
 

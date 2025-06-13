@@ -5,7 +5,6 @@
 
 use thiserror::Error;
 use std::fmt;
-use crate::eventrelay::config;
 
 /// Error code as defined in Fehlercodes.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

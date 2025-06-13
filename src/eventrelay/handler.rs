@@ -2,7 +2,7 @@ use crate::eventrelay::subscriptions::SubscriptionManager;
 use crate::eventrelay::broadcaster::ConnectionRegistry;
 
 use std::sync::Arc;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use bytes::Bytes;
 use crate::tlv::message::TLVMessage;
 
